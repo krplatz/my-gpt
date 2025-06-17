@@ -1,7 +1,8 @@
 import torch
+import wandb
 import torch.nn.functional as f
 import torch.optim as optim
-from torch import torch.nn as nn
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision import transforms
@@ -32,20 +33,26 @@ class MLP(nn.Module):
         return logits
 
 model = MLP(in_features=28*28, hidden=128, out_features=10)
-loss_fn = CrossEntropyLoss()
+loss_fn = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
+hyperparameters = {'epochs': 5, 'lr': 0.001, 'in': 28*28, 'hdn': 128, 'out': 10}
+wandb.init(config=hyperparameters)
 
 for epoch in range(5):
     total_correct = 0
+    total_loss = 0
     for (i, (batch_of_images, batch_of_labels)) in enumerate(train):
         optimizer.zero_grad()
         output = model(batch_of_images)
         loss = loss_fn(output, batch_of_labels)
         loss.backward()
         optimizer.step()
+        total_loss += loss.item()
         
         if i % 100 == 0:
-            print(f"Batch: {i}, Loss: {loss}")
+            print(f"Batch: {i}, Loss: {loss.item():.4f}")
+    
+    loss_value = total_loss / len(train)
     
     with torch.no_grad():
         for (i, (batch_of_images, batch_of_labels)) in enumerate(test):
@@ -53,4 +60,7 @@ for epoch in range(5):
             predictions = torch.argmax(output, 1)
             correct = predictions == batch_of_labels
             total_correct += correct.sum().item()
-        accuracy = total_correct / len(test.dataset)
+    
+    accuracy = total_correct / len(test.dataset)
+    log_value = {'accuracy': accuracy, 'loss': loss_value}
+    wandb.log(log_value)
