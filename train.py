@@ -11,6 +11,7 @@ val_data = np.memmap('val.bin', dtype=np.uint16, mode='r')
 
 batch_size = 64
 block_size = 128
+vocab_size = 65
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def get_batch(split):
@@ -22,9 +23,9 @@ def get_batch(split):
     ix = np.random.randint(0, len(data)-block_size, (batch_size,))
     offsets = np.arange(block_size)
     indices = ix[:, None] + offsets
-    x = torch.from_numpy(data[indices])
+    x = torch.from_numpy(data[indices]).long()
     x = x.to(device)
-    y = torch.from_numpy(data[indices+1])
+    y = torch.from_numpy(data[indices+1]).long()
     y = y.to(device)
 
     return x, y
@@ -32,28 +33,30 @@ def get_batch(split):
 class MultiHeadAttention(nn.Module):
     def __init__(self, n_embd, n_head):
         super().__init__()
+        self.n_embd = n_embd
+        self.n_head = n_head
+
         self.c_attn = nn.Linear(n_embd, 3*n_embd)
         self.attn_prediction = nn.Linear(n_embd, n_embd)
+        self.register_buffer('mask', torch.tril(torch.ones(block_size, block_size)) == 0)
     
     def forward(self, x):
         B, T, C = x.shape
         qkv = self.c_attn(x)
-        Q, K, V = qkv.split(n_embd, dim=2)
-        head_size = n_embd // n_head
+        Q, K, V = qkv.split(self.n_embd, dim=2)
+        head_size = self.n_embd // self.n_head
 
-        Q = Q.view(B, T, n_head, head_size).transpose(1, 2) # (B, n_head, T, head_size)
-        K = K.view(B, T, n_head, head_size).transpose(1, 2)
-        V = V.view(B, T, n_head, head_size).transpose(1, 2)
+        Q = Q.view(B, T, self.n_head, head_size).transpose(1, 2) # (B, n_head, T, head_size)
+        K = K.view(B, T, self.n_head, head_size).transpose(1, 2)
+        V = V.view(B, T, self.n_head, head_size).transpose(1, 2)
 
         attn_scores = Q @ K.transpose(-2, -1) # (B, n_head, T, T)
         attn_scores = attn_scores / (head_size**0.5)
-
-        mask = torch.tril(torch.ones(T, T)) == 0
-        attn_scores = attn_scores.masked_fill(mask, float('-inf'))
+        attn_scores = attn_scores.masked_fill(self.mask[:T, :T], float('-inf'))
         
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_output = attn_weights @ V # (B, n_head, T, head_size)
-        attn_output = attn_output.transpose(1, 2).view(B, T, n_embd)
+        attn_output = attn_output.transpose(1, 2).reshape(B, T, self.n_embd)
         attn_prediction = self.attn_prediction(attn_output)
         return attn_prediction
 
@@ -113,7 +116,7 @@ loss_fn = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 hyperparameters = {'epochs': 5, 'lr': 0.001, 'n_embd': 384, 'n_head': 6, 'vocab_size': 65, 'batch_size': 64, 'block_size': 128}
 wandb.init(config=hyperparameters)
-epochs = 5
+epochs = 1
 
 for epoch in range(epochs):
     total_loss = 0
@@ -133,22 +136,25 @@ for epoch in range(epochs):
         loss_value = total_loss / (len(train_data) // batch_size)
 
         if batch % 1000 == 0:
+            val_losses = []
             total_correct = 0
-            print(f"Batch: {batch}, Loss: {loss.item():.4f}")
-
-            for batch in range(len(val_data) // batch_size):
+            model.eval() 
+            for _ in range(200): 
                 with torch.no_grad():
                     x, y = get_batch('val')
                     logits = model(x)
-                    logits = logits.view(-1, vocab_size)
-                    next_char = y.view(-1,)
-                    predictions = torch.argmax(logits, 1)
-                    correct = predictions == next_char
-                    total_correct += correct.sum().item()
+                    loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
+                    val_losses.append(loss.item())
+                    predictions = torch.argmax(logits.view(-1, vocab_size), 1)
+                    total_correct += (predictions == y.view(-1)).sum().item()
     
-            accuracy = total_correct / len(val_data)
-            print(f"Validation accuracy: {accuracy}")
-            log_value = {'accuracy': accuracy, 'loss': loss_value}
+            model.train() 
+            
+            avg_val_loss = np.mean(val_losses)
+            accuracy = total_correct / (200 * block_size) 
+
+            print(f"Validation Loss: {avg_val_loss:.4f}, Validation Accuracy: {accuracy:.4f}")
+            log_value = {'train_loss': loss.item(), 'val_loss': avg_val_loss, 'val_accuracy': accuracy}
             wandb.log(log_value)
 
 torch.save(model.state_dict(), 'my_model.pth')
@@ -165,7 +171,7 @@ def generate(model, start_prompt, max_new_tokens):
         char_id = stoi_dict[char]
         encoded_prompt.append(char_id)
     
-    for _ in range(max_new_tokens)
+    for _ in range(max_new_tokens):
         logits = model(torch.tensor([encoded_prompt]).to(device))
         last_logit = logits[:, -1, :]
         predictions = torch.argmax(last_logit, 1)
