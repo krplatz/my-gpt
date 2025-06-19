@@ -1,8 +1,10 @@
 import torch
 import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F, copy
+import bitsandbytes as bnb
 
+# Initial parameters
 train_data = np.memmap('train.bin', dtype=np.uint16, mode='r')
 val_data = np.memmap('val.bin', dtype=np.uint16, mode='r')
 
@@ -28,13 +30,13 @@ def get_batch(split):
     return x, y
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embd, n_head, block_size):
+    def __init__(self, n_embd, n_head, block_size, Linear=nn.Linear):
         super().__init__()
         self.n_embd = n_embd
         self.n_head = n_head
 
-        self.c_attn = nn.Linear(n_embd, 3*n_embd)
-        self.attn_prediction = nn.Linear(n_embd, n_embd)
+        self.c_attn = Linear(n_embd, 3*n_embd)
+        self.attn_prediction = Linear(n_embd, n_embd)
         self.register_buffer('mask', torch.tril(torch.ones(block_size, block_size)) == 0)
     
     def forward(self, x):
@@ -58,10 +60,10 @@ class MultiHeadAttention(nn.Module):
         return attn_prediction
 
 class FeedForward(nn.Module):
-    def __init__(self, n_embd):
+    def __init__(self, n_embd, Linear=nn.Linear):
         super().__init__()
-        self.fc1 = nn.Linear(n_embd, 4*n_embd)
-        self.fc2 = nn.Linear(4*n_embd, n_embd)
+        self.fc1 = Linear(n_embd, 4*n_embd)
+        self.fc2 = Linear(4*n_embd, n_embd)
     
     def forward(self, x):
         x = self.fc1(x)
@@ -69,13 +71,12 @@ class FeedForward(nn.Module):
         logits = self.fc2(x)
         return logits
 
-
 class Block(nn.Module):
-    def __init__(self, n_head, n_embd, block_size):
+    def __init__(self, n_embd, n_head, block_size, Linear=nn.Linear):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
-        self.mha_layer = MultiHeadAttention(n_embd, n_head, block_size)
+        self.mha_layer = MultiHeadAttention(n_embd, n_head, block_size, Linear=Linear)
         self.ffn_layer = FeedForward(n_embd)
     
     def forward(self, x):
@@ -86,14 +87,14 @@ class Block(nn.Module):
         return x
 
 class GPTLanguageModel(nn.Module):
-    def __init__(self, n_embd, n_head, vocab_size, block_size):
+    def __init__(self, n_embd=384, n_head=6, vocab_size=65, block_size=128, Linear=nn.Linear):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, n_embd)
         self.position_embedding = nn.Embedding(block_size, n_embd)
-        block = [Block(n_head, n_embd, block_size) for _ in range(6)]
+        block = [Block(n_embd, n_head, block_size) for _ in range(6)]
         self.block = nn.Sequential(*block)
         self.ln = nn.LayerNorm(n_embd)
-        self.output_embedding = nn.Linear(n_embd, vocab_size)
+        self.output_embedding = Linear(n_embd, vocab_size)
 
     def forward(self, x):
         B, T = x.shape
@@ -107,26 +108,34 @@ class GPTLanguageModel(nn.Module):
         output_embedding = self.output_embedding(ln)
         return output_embedding
 
+# Full precision
+fp32_model = GPTLanguageModel().to(device)
+fp32_model.load_state_dict(torch.load('my_model.pth', map_location=device))
+fp32_model.eval()
+
+# 4-bit quantized
+q_model = GPTLanguageModel(Linear=bnb.nn.Linear4bit)
+q_model.load_state_dict(fp32_model.state_dict())
+torch.save(q_model.state_dict(), 'tinygpt_nf4.pth')
+q_model.to(device).eval()
+
 loss_fn = nn.CrossEntropyLoss()
-model = GPTLanguageModel(n_embd=384, n_head=6, vocab_size=65, block_size=128)
-model.load_state_dict(torch.load('my_model.pth', weights_only=True))
-model.to(device)
-model.eval()
 
-val_losses = []
-total_correct = 0
-model.eval() 
-for _ in range(len(val_data) // batch_size): 
-    with torch.no_grad():
-        x, y = get_batch('val')
+# Perplexity eval
+@torch.inference_mode()
+def eval_ppl(model):
+    tot_loss, tot_tokens = 0.0, 0
+    for _ in range(len(val_data) // batch_size):
+        x, y   = get_batch('val')
         logits = model(x)
-        loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
-        val_losses.append(loss.item())
-        predictions = torch.argmax(logits.view(-1, vocab_size), 1)
-        total_correct += (predictions == y.view(-1)).sum().item()
+        loss   = loss_fn(logits.view(-1, vocab_size), y.view(-1))
+        tot_loss  += loss.item() * x.numel()
+        tot_tokens += x.numel()
+    return np.exp(tot_loss / tot_tokens)
 
-avg_val_loss = np.mean(val_losses)
-perplexity = np.exp(avg_val_loss)
-accuracy = total_correct / ((len(val_data) // batch_size) * batch_size * block_size) 
+ppl_fp32 = eval_ppl(fp32_model)
+ppl_int4 = eval_ppl(q_model)
 
-print(f"Validation Loss: {avg_val_loss:.4f}, Perplexity: {perplexity:.4f}, Validation Accuracy: {accuracy:.4f}")
+print(f'Perplexity (fp32): {ppl_fp32:.3f}')
+print(f'Perplexity (int4): {ppl_int4:.3f}')
+print(f'Delta PPL: {(ppl_int4 / ppl_fp32 - 1) * 100:.2f}%')

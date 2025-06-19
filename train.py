@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+# Initial parameters
 train_data = np.memmap('train.bin', dtype=np.uint16, mode='r')
 val_data = np.memmap('val.bin', dtype=np.uint16, mode='r')
 
@@ -14,6 +15,7 @@ block_size = 128
 vocab_size = 65
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+# Data Loader
 def get_batch(split):
     if split == 'train':
         data = train_data
@@ -31,7 +33,7 @@ def get_batch(split):
     return x, y
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embd, n_head):
+    def __init__(self, n_embd, n_head, block_size):
         super().__init__()
         self.n_embd = n_embd
         self.n_head = n_head
@@ -74,11 +76,11 @@ class FeedForward(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, n_head, n_embd):
+    def __init__(self, n_head, n_embd, block_size):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
-        self.mha_layer = MultiHeadAttention(n_embd, n_head)
+        self.mha_layer = MultiHeadAttention(n_embd, n_head, block_size)
         self.ffn_layer = FeedForward(n_embd)
     
     def forward(self, x):
@@ -93,7 +95,7 @@ class GPTLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, n_embd)
         self.position_embedding = nn.Embedding(block_size, n_embd)
-        block = [Block(n_head, n_embd) for _ in range(6)]
+        block = [Block(n_head, n_embd, block_size) for _ in range(6)]
         self.block = nn.Sequential(*block)
         self.ln = nn.LayerNorm(n_embd)
         self.output_embedding = nn.Linear(n_embd, vocab_size)
@@ -113,7 +115,7 @@ class GPTLanguageModel(nn.Module):
 model = GPTLanguageModel(n_embd=384, n_head=6, vocab_size=65, block_size=128)
 model.to(device)
 loss_fn = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.0001)
 hyperparameters = {'epochs': 5, 'lr': 0.001, 'n_embd': 384, 'n_head': 6, 'vocab_size': 65, 'batch_size': 64, 'block_size': 128}
 wandb.init(config=hyperparameters)
 epochs = 1
@@ -151,7 +153,7 @@ for epoch in range(epochs):
             model.train() 
             
             avg_val_loss = np.mean(val_losses)
-            accuracy = total_correct / (200 * block_size) 
+            accuracy = total_correct / (200 * batch_size * block_size) 
 
             print(f"Validation Loss: {avg_val_loss:.4f}, Validation Accuracy: {accuracy:.4f}")
             log_value = {'train_loss': loss.item(), 'val_loss': avg_val_loss, 'val_accuracy': accuracy}
