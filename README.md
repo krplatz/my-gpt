@@ -4,11 +4,11 @@ Howdy, here's my own implementation for MLP and GPT. It's a sloppy mess right no
 
 ## Quick Stats
 MLP
-Final Loss: 0.041
-Final Validation Accuracy: 0.977
+* Final Loss: **0.041**
+* Final Validation Accuracy: **0.977**
 
 GPT
-Final Loss: 2.672
-Final Validation Accuracy: 0.515
-Perplexity (fp32): 19.248
-Perplexity (int4): 18.991
+* Final Loss: **2.672**
+* Final Validation Accuracy: **0.515**
+* Perplexity (fp32): **19.248**
+* Perplexity (int4): **18.991**
